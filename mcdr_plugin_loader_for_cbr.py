@@ -1,90 +1,78 @@
-import contextlib
-import importlib.util
-import json
-import os.path
-import sys
 
-from zipfile import ZipFile
-from mcdreforged.api.utils import Serializable
-from mcdreforged.api.types import VersionRequirement
-from typing import *
-from parse import parse
+import json as _js
+import os as _os
+import sys as _sys
+import importlib as _iml
+import typing as _typ
+
+from contextlib import contextmanager as _cttm
+from zipfile import ZipFile as _ZipFile
+from mcdreforged.api.utils import Serializable as _Serializable
+
+from parse import parse as _parse
 
 
 # Configuration
-TARGET_PLUGIN_FILENAME_PATTERN = [
+_TARGET_PLUGIN_FILENAME_PATTERN = [
     'rue.mcdr'
 ]   # e.g. PluginName.mcdr/pyz PluginName-v{}.mcdr/pyz
-ACCEPT_MULTIPLE_MATCH = False  # If allowed, this will load the first matched
+_ACCEPT_MULTIPLE_MATCH = False  # If allowed, this will load the first matched
 # End Config
 # DO NOT Edit the stuffs below unless you know what you are doing!
 
-METADATA_FILE_NAME = 'mcdreforged.plugin.json'
+_METADATA_FILE_NAME = 'mcdreforged.plugin.json'
+_PLUGIN_DIR = 'plugins'
 
 
-class DifferentMetadata(Serializable):
-    cbr_dependencies: Dict[str, str]
-    cbr_entrypoint: str
+class _CBRCompatiableMetadata(_Serializable):
+    id: _typ.Optional[str] = None
+    name: str
+    version: str
+    description: _typ.Union[str, _typ.Dict[str, str]]
+    author: _typ.Union[str, _typ.List[str], None]
+    link: _typ.Optional[str]
+    cbr_dependencies: _typ.Dict[str, str]
 
-    @property
-    def cbr_part(self):
-        data, ret = self.serialize(), {}
-        for key, value in data.items():
-            ret[key[4:]] = value
+    cbr_entrypoint: str  # Actually not exists
+
+    def get_meta(self, file: str):
+        if self.id is None:
+            self.id = file.rsplit('.', maxsplit=1)[0]
+        if isinstance(self.description, dict):
+            self.description = list(self.description.values())[0]
+        ret = {}
+        for key, value in self.serialize().items():
+            if key.startswith('cbr_'):
+                key = key [4:]
+            ret[key] = value
         return ret
 
 
-class CBRMetadata(Serializable):
-    id: str
-    name: str
-    version: str
-    description: Union[str, Dict[str, str]]
-    author: Union[str, List[str], None]
-    link: Optional[str]
-    dependencies: Dict[str, str]
-
-    entrypoint: str  # Actually not exists
-
-    @property
-    def entry(self):
-        return self.serialize().get('entrypoint', self.id)
-
-
-class TargetMCDRPlugin:
+class _TargetMCDRPlugin:
     def __init__(self, path: str):
         self._path = path
-        self.__spec = None
         self.instance = None
-        self.__metadata: Optional[CBRMetadata] = None
+        self.__metadata: _typ.Optional[dict] = None
 
-    @contextlib.contextmanager
+    @_cttm
     def open_bundled_file(self, path: str):
         raise NotImplementedError
 
-    def get_metadata(self) -> CBRMetadata:
+    def get_metadata(self) -> dict:
         if self.__metadata is None:
             self.__metadata = self._get_metadata()
         return self.__metadata
 
-    def _get_metadata(self) -> CBRMetadata:
-        with self.open_bundled_file(METADATA_FILE_NAME) as file:
-            data = json.load(file)
-        if 'id' not in data:
-            data['id'] = os.path.basename(self._path).rsplit('.', maxsplit=1)[0]
-        if 'dependencies' in data.keys():
-            del data['dependencies']
-        if 'entrypoint' in data.keys():
-            del data['entrypoint']
-        meta, diff = CBRMetadata.deserialize(data), DifferentMetadata.deserialize(data)
-        meta.update_from(diff.cbr_part)
-        if isinstance(meta.description, dict):
-            meta.description = list(meta.description.values())[0]
-        return meta
+    def _get_metadata(self) -> dict:
+        with self.open_bundled_file(_METADATA_FILE_NAME) as file:
+            data: dict = _js.load(file)
+        meta = _CBRCompatiableMetadata.deserialize(data)
+        return meta.get_meta(_os.path.basename(self._path))
 
     def import_entrypoint(self):
-        sys.path.append(self._path)
+        _sys.path.append(self._path)
         meta = self.get_metadata()
-        target_module = importlib.import_module(meta.entry)
+        target_module = _iml.import_module(meta['entrypoint'])
 
         module_dict = target_module.__dict__
         try:
@@ -94,46 +82,48 @@ class TargetMCDRPlugin:
         globals().update({name: module_dict[name] for name in to_import})
 
     def unload(self):
-        if self._path in sys.path:
-            sys.path.remove(self._path)
-        self.__spec = None
+        if self._path in _sys.path:
+            _sys.path.remove(self._path)
         self.instance = None
 
 
-class ZipPlugin(TargetMCDRPlugin):
-    @contextlib.contextmanager
+class _ZipPlugin(_TargetMCDRPlugin):
+    @_cttm
     def open_bundled_file(self, path: str):
-        with ZipFile(self._path).open(path) as file:
+        with _ZipFile(self._path).open(path) as file:
             yield file
 
 
-class FolderPlugin(TargetMCDRPlugin):
-    @contextlib.contextmanager
+class _FolderPlugin(_TargetMCDRPlugin):
+    @_cttm
     def open_bundled_file(self, path: str):
-        with open(os.path.join(self._path, path), encoding='utf8') as file:
+        with open(_os.path.join(self._path, path), encoding='utf8') as file:
             yield file
 
 
-PLUGIN_DIR = 'plugins'
-matched = []
-for file_name in os.listdir(PLUGIN_DIR):
-    for pattern in TARGET_PLUGIN_FILENAME_PATTERN:
-        if parse(pattern, file_name) is not None:
-            matched.append(os.path.join(PLUGIN_DIR, file_name))
+def __load_plugin() -> _TargetMCDRPlugin:
+    matched = []
+    for file_name in _os.listdir(_PLUGIN_DIR):
+        for pattern in _TARGET_PLUGIN_FILENAME_PATTERN:
+            if _parse(pattern, file_name) is not None:
+                matched.append(_os.path.join(_PLUGIN_DIR, file_name))
 
-if len(matched) == 0:
-    os.remove(__file__)
-    raise FileNotFoundError('Target plugin not found')
-elif len(matched) > 1 and not ACCEPT_MULTIPLE_MATCH:
-    raise RuntimeError('Multiple target plugin found')
-else:
-    target_plugin = matched[0]
-    if not os.path.exists(target_plugin):
-        raise FileNotFoundError('Target plugin moved or damaged')
-    elif os.path.isdir(target_plugin):
-        plugin_inst = FolderPlugin(target_plugin)
+    if len(matched) == 0:
+        _os.remove(__file__)
+        raise FileNotFoundError('Target plugin not found')
+    elif len(matched) > 1 and not _ACCEPT_MULTIPLE_MATCH:
+        raise RuntimeError('Multiple target plugin found')
     else:
-        plugin_inst = ZipPlugin(target_plugin)
+        target_plugin = matched[0]
+        if not _os.path.exists(target_plugin):
+            raise FileNotFoundError('Target plugin moved or damaged')
+        elif _os.path.isdir(target_plugin):
+            plugin_inst = _FolderPlugin(target_plugin)
+        else:
+            plugin_inst = _ZipPlugin(target_plugin)
+    return plugin_inst
 
-METADATA = plugin_inst.get_metadata().serialize()
-plugin_inst.import_entrypoint()
+__inst = __load_plugin()
+
+METADATA = __inst.get_metadata()
+__inst.import_entrypoint()
